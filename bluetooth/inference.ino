@@ -13,7 +13,6 @@
 #include "model_data.h"
 
 // ── Config ────────────────────────────────────────────────────
-#define ANOMALY_THRESHOLD 0.0055f
 #define TENSOR_ARENA_SIZE (800 * 1024)
 
 // ── I2S / Audio ───────────────────────────────────────────────
@@ -27,15 +26,15 @@ static bool i2sReady = false;
 
 // ── PSRAM buffers ─────────────────────────────────────────────
 static uint8_t* tensorArena = nullptr;
-static uint8_t* rgbBuf      = nullptr;
-static uint8_t* interpMem   = nullptr;
+static uint8_t* rgbBuf = nullptr;
+static uint8_t* interpMem = nullptr;
 
 // AllOpsResolver as static — avoids placement new restriction
 // It lives in internal RAM but is small enough (~2KB)
 static tflite::AllOpsResolver allOpsResolver;
 
 static tflite::MicroInterpreter* interpreter = nullptr;
-static const tflite::Model*      tflModel    = nullptr;
+static const tflite::Model* tflModel = nullptr;
 
 static bool inferenceReady = false;
 
@@ -56,10 +55,10 @@ static void i2sInit() {
     .fixed_mclk = 0
   };
   i2s_pin_config_t pins = {
-    .bck_io_num   = PIN_I2S_BCLK,
-    .ws_io_num    = PIN_I2S_LRCK,
+    .bck_io_num = PIN_I2S_BCLK,
+    .ws_io_num = PIN_I2S_LRCK,
     .data_out_num = PIN_I2S_DOUT,
-    .data_in_num  = I2S_PIN_NO_CHANGE
+    .data_in_num = I2S_PIN_NO_CHANGE
   };
   if (i2s_driver_install(I2S_PORT, &cfg, 0, nullptr) != ESP_OK) {
     Serial.println("I2S install failed");
@@ -84,7 +83,7 @@ void playLeaveIt() {
     size_t frames = 256;
     if (i + frames > mono_samples) frames = mono_samples - i;
     for (size_t f = 0; f < frames; f++) {
-      stereo[2 * f]     = mono[i + f];
+      stereo[2 * f] = mono[i + f];
       stereo[2 * f + 1] = mono[i + f];
     }
     size_t written = 0;
@@ -97,34 +96,42 @@ void playLeaveIt() {
 
 void inferenceSetup() {
   Serial.printf("Free heap: %lu, Free PSRAM: %lu\n",
-    ESP.getFreeHeap(), ESP.getFreePsram());
+                ESP.getFreeHeap(), ESP.getFreePsram());
 
   Serial.println("Allocating tensorArena...");
   tensorArena = (uint8_t*)heap_caps_aligned_alloc(16, TENSOR_ARENA_SIZE, MALLOC_CAP_SPIRAM);
-  if (!tensorArena) { Serial.println("FAILED"); return; }
+  if (!tensorArena) {
+    Serial.println("FAILED");
+    return;
+  }
   Serial.println("OK");
 
   Serial.println("Allocating rgbBuf...");
   rgbBuf = (uint8_t*)heap_caps_aligned_alloc(16, 96 * 96 * 2, MALLOC_CAP_SPIRAM);
-  if (!rgbBuf) { Serial.println("FAILED"); return; }
+  if (!rgbBuf) {
+    Serial.println("FAILED");
+    return;
+  }
   Serial.println("OK");
 
   Serial.println("Loading model...");
   tflModel = tflite::GetModel(model_tflite);
   if (tflModel->version() != TFLITE_SCHEMA_VERSION) {
     Serial.printf("Schema mismatch: %d vs %d\n",
-      tflModel->version(), TFLITE_SCHEMA_VERSION);
+                  tflModel->version(), TFLITE_SCHEMA_VERSION);
     return;
   }
   Serial.println("OK");
 
   Serial.println("Allocating interpreter...");
   interpMem = (uint8_t*)heap_caps_aligned_alloc(16,
-    sizeof(tflite::MicroInterpreter), MALLOC_CAP_SPIRAM);
-  if (!interpMem) { Serial.println("FAILED"); return; }
-  interpreter = new(interpMem) tflite::MicroInterpreter(
-    tflModel, allOpsResolver, tensorArena, TENSOR_ARENA_SIZE
-  );
+                                                sizeof(tflite::MicroInterpreter), MALLOC_CAP_SPIRAM);
+  if (!interpMem) {
+    Serial.println("FAILED");
+    return;
+  }
+  interpreter = new (interpMem) tflite::MicroInterpreter(
+    tflModel, allOpsResolver, tensorArena, TENSOR_ARENA_SIZE);
   Serial.println("OK");
 
   Serial.println("Allocating tensors...");
@@ -133,20 +140,26 @@ void inferenceSetup() {
     return;
   }
   Serial.printf("OK — arena used: %u / %u bytes\n",
-    interpreter->arena_used_bytes(), TENSOR_ARENA_SIZE);
+                interpreter->arena_used_bytes(), TENSOR_ARENA_SIZE);
 
   TfLiteTensor* input = interpreter->input(0);
-  if (!input) { Serial.println("Input tensor null!"); return; }
+  if (!input) {
+    Serial.println("Input tensor null!");
+    return;
+  }
   Serial.printf("Input: ptr=%p bytes=%d type=%d\n",
-    input->data.raw, input->bytes, input->type);
+                input->data.raw, input->bytes, input->type);
 
   TfLiteTensor* output = interpreter->output(0);
-  if (!output) { Serial.println("Output tensor null!"); return; }
+  if (!output) {
+    Serial.println("Output tensor null!");
+    return;
+  }
   Serial.printf("Output: ptr=%p bytes=%d type=%d\n",
-    output->data.raw, output->bytes, output->type);
+                output->data.raw, output->bytes, output->type);
 
   Serial.printf("Free heap: %lu, Free PSRAM: %lu\n",
-    ESP.getFreeHeap(), ESP.getFreePsram());
+                ESP.getFreeHeap(), ESP.getFreePsram());
 
   i2sInit();
   inferenceReady = true;
@@ -154,14 +167,11 @@ void inferenceSetup() {
 }
 
 // ── Inference ─────────────────────────────────────────────────
-
 void runInference() {
   if (!inferenceReady) {
     Serial.println("Not ready, skipping");
     return;
   }
-
-  Serial.printf("Free heap: %lu\n", ESP.getFreeHeap());
 
   // Capture 96x96 RGB565
   CamStatus st = myCamera.takePicture(CAM_IMAGE_MODE_96X96, CAM_IMAGE_PIX_FMT_RGB565);
@@ -184,43 +194,42 @@ void runInference() {
     if (n == 0) { Serial.println("READ_ERR"); return; }
     bytesRead += n;
   }
-  Serial.printf("Frame read: %lu bytes\n", bytesRead);
 
-  // Convert RGB565 → float RGB888 directly into input tensor
+  // Convert RGB565 → uint8_t RGB888 for quantized input
   TfLiteTensor* input = interpreter->input(0);
-  float* dst = input->data.f;
-
+  uint8_t* dst = input->data.uint8;  // Quantized input expects uint8
+  
   for (uint32_t px = 0; px < 96 * 96; px++) {
     uint16_t rgb565 = ((uint16_t)rgbBuf[px * 2] << 8) | rgbBuf[px * 2 + 1];
     uint8_t r = (rgb565 >> 11) & 0x1F; r = (r << 3) | (r >> 2);
     uint8_t g = (rgb565 >> 5)  & 0x3F; g = (g << 2) | (g >> 4);
     uint8_t b =  rgb565        & 0x1F; b = (b << 3) | (b >> 2);
-    dst[px * 3 + 0] = r / 255.0f;
-    dst[px * 3 + 1] = g / 255.0f;
-    dst[px * 3 + 2] = b / 255.0f;
+    
+    // Quantized input expects values 0-255 (no normalization)
+    dst[px * 3 + 0] = r;
+    dst[px * 3 + 1] = g;
+    dst[px * 3 + 2] = b;
   }
-  Serial.println("Running inference...");
 
   if (interpreter->Invoke() != kTfLiteOk) {
     Serial.println("Invoke failed");
     return;
   }
-  Serial.println("Inference done");
-
-  // Compute MSE between input and reconstructed output
+  
+  // Get output (0 = allowed, 1 = not allowed)
   TfLiteTensor* output = interpreter->output(0);
-  float mse = 0.0f;
-  uint32_t n = 96 * 96 * 3;
-  for (uint32_t i = 0; i < n; i++) {
-    float diff = dst[i] - output->data.f[i];
-    mse += diff * diff;
-  }
-  mse /= n;
+  float probability = output->data.uint8[0] / 255.0f;  // Convert from uint8 to float
+  
+  // Threshold at 0.5 (adjust as needed)
+  bool isNotAllowed = probability > 0.5;
+  
+  Serial.printf("Probability of NOT ALLOWED: %.2f%% — %s\n",
+    probability * 100,
+    isNotAllowed ? "NOT ALLOWED" : "Allowed"
+  );
 
-  Serial.printf("MSE: %.6f — %s\n",
-    mse, mse > ANOMALY_THRESHOLD ? "NOT ALLOWED" : "Allowed");
-
-  if (mse > ANOMALY_THRESHOLD) {
-    playLeaveIt();
+  // Send result over WiFi
+  if (WiFi.status() == WL_CONNECTED) {
+    sendResultToLaptop(probability, isNotAllowed);
   }
 }

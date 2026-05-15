@@ -1,4 +1,5 @@
 captures/
 venv/
 allowed/
+not_allowed/
 mlModel/tfenv/

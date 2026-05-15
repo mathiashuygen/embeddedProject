@@ -4,13 +4,33 @@
 #include <SPI.h>
 #include <driver/i2s.h>
 #include "ardCam.h"
+#include <WiFiUdp.h>
 
 const char* SSID     = "Proximus-Home-550214";
 const char* PASSWORD = "ns5xn9u7bfym4nen";
+const char* LAPTOP_IP = "192.168.129.125";  // Replace
+const int LAPTOP_PORT = 8080;
+
 
 WebServer server(80);
 
 #define INFERENCE_INTERVAL_MS 2000
+
+
+
+WiFiUDP udp;
+
+void sendResultToLaptop(float mse, bool isAnomaly) {
+  udp.beginPacket(LAPTOP_IP, LAPTOP_PORT);
+  char buffer[128];
+  snprintf(buffer, sizeof(buffer), "%.6f,%s,%lu", 
+           mse, 
+           isAnomaly ? "NOT_ALLOWED" : "allowed", 
+           millis());
+  udp.print(buffer);
+  udp.endPacket();
+  Serial.printf("UDP sent: %s\n", buffer);
+}
 
 void handleCapture() {
   CamStatus st = myCamera.takePicture(CAM_IMAGE_MODE_QVGA, CAM_IMAGE_PIX_FMT_JPG);
