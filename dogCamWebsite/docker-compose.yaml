@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  backend:
+    build: ./backend
+    container_name: dogcam-backend
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - NODE_ENV=production
+    restart: unless-stopped
+    networks:
+      - dogcam-network
+
+  frontend:
+    build: ./frontend
+    container_name: dogcam-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - dogcam-network
+
+networks:
+  dogcam-network:
+    driver: bridge
