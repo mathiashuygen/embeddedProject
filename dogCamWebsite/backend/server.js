@@ -145,7 +145,7 @@ app.post('/upload-inference', upload.fields([
     // Broadcast to web clients via WebSocket
     io.emit('new-detection', {
       id: result.lastID,
-      timestamp: metadata.timestamp * 1000,
+      timestamp: metadata.timestamp,
       probability: metadata.probability,
       result: metadata.result
     });

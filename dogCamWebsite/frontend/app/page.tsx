@@ -464,7 +464,7 @@ export default function Home() {
               Camera
             </div>
             <div className="sleep-toggle" onClick={toggleSleep}>
-              <span className="sleep-label">Sleep</span>
+              <span className="sleep-label">Sleep Regime</span>
               <label className="switch" onClick={e => e.stopPropagation()}>
                 <input type="checkbox" checked={sleepMode} onChange={toggleSleep} />
                 <span className="slider" />

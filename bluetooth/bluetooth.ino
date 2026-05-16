@@ -182,6 +182,7 @@ static void checkSleepMode() {
 
 // ── goToDeepSleep — helper ────────────────────────────────────────────────────
 static void goToDeepSleep() {
+  time(&rtcTime);  // ✅ save exact time before sleeping
   Serial.printf("Sleeping %ds (boot #%d, active for %lums)\n",
     SLEEP_SECONDS, bootCount, millis());
   Serial.flush();
@@ -201,7 +202,7 @@ void setup() {
 
   // Restore system clock from RTC memory so time() works immediately
   if (rtcTime > 0) {
-    struct timeval tv = { .tv_sec = rtcTime + SLEEP_SECONDS, .tv_usec = 0 };
+    struct timeval tv = { .tv_sec = rtcTime, .tv_usec = 0 };
     settimeofday(&tv, nullptr);
     Serial.println("Clock restored from RTC memory");
   }
@@ -209,6 +210,10 @@ void setup() {
   bool wifiOk = connectWiFi();
 
   if (wifiOk) {
+    // ✅ Set timezone for Brussels (CET/CEST)
+    setenv("TZ", "CET-1CEST,M3.5.0/2,M10.5.0/3", 1);
+    tzset();
+
     // Re-sync NTP on first boot or every NTP_RESYNC_BOOTS boots
     bool needNtp = (rtcTime == 0) || (bootCount % NTP_RESYNC_BOOTS == 1);
     if (needNtp) {
@@ -227,6 +232,14 @@ void setup() {
       Serial.printf("NTP skipped (boot %d, next sync at boot %d)\n",
         bootCount, ((bootCount / NTP_RESYNC_BOOTS) + 1) * NTP_RESYNC_BOOTS + 1);
     }
+
+    // Optional: print human-readable local time for debugging
+    time_t now = time(nullptr);
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    char buf[32];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
+    Serial.printf("ESP time: %s\n", buf);
   }
 
   // Create upload queue and task
