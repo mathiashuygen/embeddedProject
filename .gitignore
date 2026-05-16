@@ -9,4 +9,6 @@ mlModel/model.tflite
 mlModel/threshold.txt 
 mlModel/training_history.png
 bluetooth/secrets.h
+mlModel/data/
+dogCamWebsite/data/
 
