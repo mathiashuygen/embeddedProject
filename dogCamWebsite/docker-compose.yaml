@@ -11,11 +11,12 @@ services:
     environment:
       - NODE_ENV=production
     restart: unless-stopped
-    networks:
-      - dogcam-network
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        - NEXT_PUBLIC_BACKEND_URL=http://100.117.181.50:8080
     container_name: dogcam-frontend
     ports:
       - "3000:3000"
@@ -24,9 +25,3 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
-    networks:
-      - dogcam-network
-
-networks:
-  dogcam-network:
-    driver: bridge

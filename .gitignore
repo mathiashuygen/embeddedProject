@@ -3,3 +3,10 @@ venv/
 allowed/
 not_allowed/
 mlModel/tfenv/
+mlModel/model_data.h 
+mlModel/best_model.keras 
+mlModel/model.tflite 
+mlModel/threshold.txt 
+mlModel/training_history.png
+bluetooth/secrets.h
+

@@ -3,7 +3,7 @@
 #undef Bool
 #endif
 #include <Chirale_TensorFlowLite.h>
-#include <tensorflow/lite/micro/all_ops_resolver.h>
+#include <tensorflow/lite/micro/micro_mutable_op_resolver.h>
 #include <tensorflow/lite/micro/micro_interpreter.h>
 #include <tensorflow/lite/schema/schema_generated.h>
 #include <driver/i2s.h>
@@ -13,7 +13,7 @@
 #include "model_data.h"
 
 // ── Config ────────────────────────────────────────────────────
-#define TENSOR_ARENA_SIZE (800 * 1024)
+#define TENSOR_ARENA_SIZE (512 * 1024)
 
 // ── I2S / Audio ───────────────────────────────────────────────
 #define PIN_I2S_BCLK 11
@@ -29,22 +29,17 @@ static uint8_t* tensorArena = nullptr;
 static uint8_t* rgbBuf = nullptr;
 static uint8_t* interpMem = nullptr;
 
-// AllOpsResolver as static — avoids placement new restriction
-// It lives in internal RAM but is small enough (~2KB)
-static tflite::AllOpsResolver allOpsResolver;
-
+static tflite::MicroMutableOpResolver<9>* resolver = nullptr;
 static tflite::MicroInterpreter* interpreter = nullptr;
 static const tflite::Model* tflModel = nullptr;
 
 static bool inferenceReady = false;
 
-
-// store the current inference image
-static uint8_t* inferenceImageBuffer = nullptr;
-static uint32_t inferenceImageSize = 0;
+// Shared with bluetooth.ino for async upload
+uint8_t* inferenceImageBuffer = nullptr;
+uint32_t inferenceImageSize = 0;
 
 // ── Audio ─────────────────────────────────────────────────────
-
 static void i2sInit() {
   i2s_config_t cfg = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
@@ -82,7 +77,7 @@ void playLeaveIt() {
   if (!i2sReady) return;
   const int16_t* mono = (const int16_t*)voice_raw;
   const size_t mono_samples = voice_raw_len / 2;
-  static int16_t stereo[256 * 2];
+  int16_t stereo[256 * 2];
   size_t i = 0;
   while (i < mono_samples) {
     size_t frames = 256;
@@ -98,73 +93,67 @@ void playLeaveIt() {
 }
 
 // ── Setup ─────────────────────────────────────────────────────
-
 void inferenceSetup() {
-  Serial.printf("Free heap: %lu, Free PSRAM: %lu\n",
-                ESP.getFreeHeap(), ESP.getFreePsram());
-
-  Serial.println("Allocating tensorArena...");
   tensorArena = (uint8_t*)heap_caps_aligned_alloc(16, TENSOR_ARENA_SIZE, MALLOC_CAP_SPIRAM);
   if (!tensorArena) {
-    Serial.println("FAILED");
+    Serial.println("tensorArena FAILED");
     return;
   }
-  Serial.println("OK");
 
-  Serial.println("Allocating rgbBuf...");
   rgbBuf = (uint8_t*)heap_caps_aligned_alloc(16, 96 * 96 * 2, MALLOC_CAP_SPIRAM);
   if (!rgbBuf) {
-    Serial.println("FAILED");
+    Serial.println("rgbBuf FAILED");
     return;
   }
-  Serial.println("OK");
 
-  Serial.println("Loading model...");
+  // Persistent image buffer for async upload (stays allocated, reused each frame)
+  inferenceImageSize = 96 * 96 * 2;
+  inferenceImageBuffer = (uint8_t*)heap_caps_malloc(inferenceImageSize, MALLOC_CAP_SPIRAM);
+  if (!inferenceImageBuffer) {
+    Serial.println("imageBuffer FAILED");
+    return;
+  }
+
   tflModel = tflite::GetModel(model_tflite);
   if (tflModel->version() != TFLITE_SCHEMA_VERSION) {
-    Serial.printf("Schema mismatch: %d vs %d\n",
-                  tflModel->version(), TFLITE_SCHEMA_VERSION);
+    Serial.printf("Schema mismatch: %d vs %d\n", tflModel->version(), TFLITE_SCHEMA_VERSION);
     return;
   }
-  Serial.println("OK");
+  resolver = new tflite::MicroMutableOpResolver<9>();
 
-  Serial.println("Allocating interpreter...");
+  resolver->AddMul();
+  resolver->AddAdd();
+  resolver->AddConv2D();
+  resolver->AddDepthwiseConv2D();
+  resolver->AddFullyConnected();
+  resolver->AddLogistic();
+  resolver->AddMaxPool2D();
+  resolver->AddMean();
+  resolver->AddQuantize();
+
   interpMem = (uint8_t*)heap_caps_aligned_alloc(16,
                                                 sizeof(tflite::MicroInterpreter), MALLOC_CAP_SPIRAM);
   if (!interpMem) {
-    Serial.println("FAILED");
+    Serial.println("interpMem FAILED");
     return;
   }
+
   interpreter = new (interpMem) tflite::MicroInterpreter(
-    tflModel, allOpsResolver, tensorArena, TENSOR_ARENA_SIZE);
-  Serial.println("OK");
+    tflModel, *resolver, tensorArena, TENSOR_ARENA_SIZE);
 
-  Serial.println("Allocating tensors...");
   if (interpreter->AllocateTensors() != kTfLiteOk) {
-    Serial.println("FAILED");
+    Serial.println("AllocateTensors FAILED");
     return;
   }
-  Serial.printf("OK — arena used: %u / %u bytes\n",
-                interpreter->arena_used_bytes(), TENSOR_ARENA_SIZE);
 
-  TfLiteTensor* input = interpreter->input(0);
-  if (!input) {
+  if (!interpreter->input(0)) {
     Serial.println("Input tensor null!");
     return;
   }
-  Serial.printf("Input: ptr=%p bytes=%d type=%d\n",
-                input->data.raw, input->bytes, input->type);
-
-  TfLiteTensor* output = interpreter->output(0);
-  if (!output) {
+  if (!interpreter->output(0)) {
     Serial.println("Output tensor null!");
     return;
   }
-  Serial.printf("Output: ptr=%p bytes=%d type=%d\n",
-                output->data.raw, output->bytes, output->type);
-
-  Serial.printf("Free heap: %lu, Free PSRAM: %lu\n",
-                ESP.getFreeHeap(), ESP.getFreePsram());
 
   i2sInit();
   inferenceReady = true;
@@ -178,12 +167,18 @@ void runInference() {
     return;
   }
 
-  // Capture ONE image for inference (96x96 RGB565)
+  unsigned long t0 = millis();
+
+  // ── Capture ──  
+  CamStatus stTemp = myCamera.takePicture(CAM_IMAGE_MODE_96X96, CAM_IMAGE_PIX_FMT_RGB565);
+  delay(600);
   CamStatus st = myCamera.takePicture(CAM_IMAGE_MODE_96X96, CAM_IMAGE_PIX_FMT_RGB565);
   if (st != CAM_ERR_SUCCESS) {
     Serial.printf("Capture failed: %d\n", (int)st);
     return;
   }
+  Serial.printf("[TIMING] Capture: %lums\n", millis() - t0);
+  unsigned long t1 = millis();
 
   uint32_t total = myCamera.getTotalLength();
   if (total == 0 || total > 96 * 96 * 2) {
@@ -191,7 +186,7 @@ void runInference() {
     return;
   }
 
-  // Read RGB565 into PSRAM rgbBuf (for inference)
+  // ── Buffer read ──
   uint32_t bytesRead = 0;
   while (bytesRead < total) {
     uint8_t toRead = (total - bytesRead > CHUNK) ? CHUNK : (uint8_t)(total - bytesRead);
@@ -202,38 +197,15 @@ void runInference() {
     }
     bytesRead += n;
   }
+  Serial.printf("[TIMING] Buffer read: %lums\n", millis() - t1);
+  unsigned long t2 = millis();
 
-  // STORE the image for later sending (convert to JPEG for smaller size)
-  // First, free previous buffer if exists
-  if (inferenceImageBuffer) {
-    free(inferenceImageBuffer);
-    inferenceImageBuffer = nullptr;
-  }
+  // Copy into persistent image buffer for async upload
+  memcpy(inferenceImageBuffer, rgbBuf, inferenceImageSize);
 
-  // Capture a JPEG version of the SAME scene for sending to laptop
-  // Note: The camera is still pointing at the same scene
-  st = myCamera.takePicture(CAM_IMAGE_MODE_QVGA, CAM_IMAGE_PIX_FMT_JPG);
-  if (st == CAM_ERR_SUCCESS) {
-    inferenceImageSize = myCamera.getTotalLength();
-    if (inferenceImageSize > 0 && inferenceImageSize < 100 * 1024) {  // Max 100KB
-      inferenceImageBuffer = (uint8_t*)malloc(inferenceImageSize);
-      if (inferenceImageBuffer) {
-        uint32_t jpgRead = 0;
-        while (jpgRead < inferenceImageSize) {
-          uint8_t toRead = (inferenceImageSize - jpgRead > CHUNK) ? CHUNK : (uint8_t)(inferenceImageSize - jpgRead);
-          uint8_t n = myCamera.readBuff(inferenceImageBuffer + jpgRead, toRead);
-          if (n == 0) break;
-          jpgRead += n;
-        }
-        Serial.printf("Stored %lu bytes JPEG for sending\n", inferenceImageSize);
-      }
-    }
-  }
-
-  // Perform inference on the RGB565 image (already in rgbBuf)
+  // ── Tensor fill ──
   TfLiteTensor* input = interpreter->input(0);
   uint8_t* dst = input->data.uint8;
-
   for (uint32_t px = 0; px < 96 * 96; px++) {
     uint16_t rgb565 = ((uint16_t)rgbBuf[px * 2] << 8) | rgbBuf[px * 2 + 1];
     uint8_t r = (rgb565 >> 11) & 0x1F;
@@ -242,133 +214,34 @@ void runInference() {
     g = (g << 2) | (g >> 4);
     uint8_t b = rgb565 & 0x1F;
     b = (b << 3) | (b >> 2);
-
     dst[px * 3 + 0] = r;
     dst[px * 3 + 1] = g;
     dst[px * 3 + 2] = b;
   }
+  Serial.printf("[TIMING] Tensor fill: %lums\n", millis() - t2);
+  unsigned long t3 = millis();
 
+  // ── Inference ──
   if (interpreter->Invoke() != kTfLiteOk) {
     Serial.println("Invoke failed");
     return;
   }
+  Serial.printf("[TIMING] Inference: %lums\n", millis() - t3);
 
+  // ── Result ──
   TfLiteTensor* output = interpreter->output(0);
   float probability = output->data.uint8[0] / 255.0f;
-  bool isNotAllowed = probability > 0.5;
+  bool isNotAllowed = probability > 0.5f;
 
   Serial.printf("Probability: %.2f%% — %s\n",
-                probability * 100,
-                isNotAllowed ? "NOT ALLOWED" : "Allowed");
+                probability * 100, isNotAllowed ? "NOT ALLOWED" : "Allowed");
 
-  // Send result AND the captured image over UDP + HTTP
-  if (WiFi.status() == WL_CONNECTED && inferenceImageBuffer && inferenceImageSize > 0) {
+  //if (isNotAllowed) playLeaveIt();
+
+  // ── Enqueue upload (non-blocking, returns immediately) ──
+  if (WiFi.status() == WL_CONNECTED) {
     sendImageToLaptopWithResult(probability, isNotAllowed);
   }
-}
 
-
-
-
-
-bool sendImageToLaptopWithResult(float probability, bool isNotAllowed) {
-  if (!inferenceImageBuffer || inferenceImageSize == 0) {
-    Serial.println("No image buffer to send");
-    return false;
-  }
-  
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi not connected");
-    return false;
-  }
-  
-  Serial.printf("Attempting HTTP POST to %s:8081...\n", LAPTOP_IP);
-  
-  WiFiClient client;
-  
-  // Set timeout
-  client.setTimeout(5000);
-  
-  if (!client.connect(LAPTOP_IP, LAPTOP_PORT)) {
-    Serial.printf("❌ HTTP connection failed to %s:8081\n", LAPTOP_IP);
-    Serial.println("   Make sure the backend container is running:");
-    Serial.println("   Run: docker-compose ps");
-    Serial.println("   Run: docker-compose logs backend");
-    return false;
-  }
-  
-  Serial.println("✅ Connected to laptop HTTP server");
-  
-  String boundary = "----ESP32Boundary";
-  
-  // Create JSON metadata
-  String jsonData = "{";
-  jsonData += "\"probability\":" + String(probability, 6) + ",";
-  jsonData += "\"result\":\"" + String(isNotAllowed ? "NOT_ALLOWED" : "allowed") + "\",";
-  jsonData += "\"timestamp\":" + String(millis());
-  jsonData += "}";
-  
-  // Build multipart request
-  String bodyStart = "--" + boundary + "\r\n";
-  bodyStart += "Content-Disposition: form-data; name=\"metadata\"\r\n";
-  bodyStart += "Content-Type: application/json\r\n\r\n";
-  bodyStart += jsonData + "\r\n";
-  
-  bodyStart += "--" + boundary + "\r\n";
-  bodyStart += "Content-Disposition: form-data; name=\"image\"; filename=\"inference.jpg\"\r\n";
-  bodyStart += "Content-Type: image/jpeg\r\n\r\n";
-  
-  String bodyEnd = "\r\n--" + boundary + "--\r\n";
-  
-  uint32_t totalSize = bodyStart.length() + inferenceImageSize + bodyEnd.length();
-  
-  // Send HTTP headers
-  client.print("POST /upload-inference HTTP/1.1\r\n");
-  client.print("Host: " + String(LAPTOP_IP) + ":8080\r\n");
-  client.print("Content-Type: multipart/form-data; boundary=" + boundary + "\r\n");
-  client.print("Content-Length: " + String(totalSize) + "\r\n");
-  client.print("\r\n");
-  
-  // Send multipart body
-  client.print(bodyStart);
-  
-  // Send image binary data in chunks
-  uint32_t sent = 0;
-  while (sent < inferenceImageSize) {
-    uint32_t toSend = (inferenceImageSize - sent > CHUNK) ? CHUNK : (inferenceImageSize - sent);
-    int bytesWritten = client.write(inferenceImageBuffer + sent, toSend);
-    if (bytesWritten <= 0) {
-      Serial.println("❌ Failed to send image data");
-      client.stop();
-      return false;
-    }
-    sent += bytesWritten;
-  }
-  
-  client.print(bodyEnd);
-  
-  // Wait for response
-  unsigned long timeout = millis() + 3000;
-  while (!client.available() && millis() < timeout) {
-    delay(10);
-  }
-  
-  String response = "";
-  while (client.available()) {
-    response += client.readString();
-  }
-  
-  client.stop();
-  
-  if (response.length() > 0) {
-    Serial.printf("✅ HTTP response received (%d bytes)\n", response.length());
-    if (response.indexOf("success") > 0) {
-      Serial.println("✅ Image upload successful!");
-      return true;
-    }
-  } else {
-    Serial.println("⚠️ No response from server (but image may have been sent)");
-  }
-  
-  return false;
+  Serial.printf("[TIMING] Total cycle (excl. upload): %lums\n", millis() - t0);
 }

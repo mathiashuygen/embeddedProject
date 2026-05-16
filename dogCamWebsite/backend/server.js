@@ -8,6 +8,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import cors from 'cors';
 import fs from 'fs';
+import sharp from 'sharp';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,12 +25,52 @@ app.use(express.json());
 // Configure multer for file uploads
 const upload = multer({ storage: multer.memoryStorage() });
 
+// Helper: Convert RGB565 to RGB888 buffer
+function rgb565ToRgb888(rgb565Buffer) {
+  const pixelCount = rgb565Buffer.length / 2;
+  const rgb888 = Buffer.alloc(pixelCount * 3);
+  
+  for (let i = 0; i < pixelCount; i++) {
+    // Read RGB565 value (little-endian: low byte then high byte)
+    const highByte = rgb565Buffer[i * 2];
+    const lowByte = rgb565Buffer[i * 2 + 1];
+    const rgb565 = (highByte << 8) | lowByte;    
+    // Extract and expand components
+    let r = (rgb565 >> 11) & 0x1F;
+    let g = (rgb565 >> 5) & 0x3F;
+    let b = rgb565 & 0x1F;
+    
+    // Expand to 8-bit
+    r = (r << 3) | (r >> 2);
+    g = (g << 2) | (g >> 4);
+    b = (b << 3) | (b >> 2);
+    
+    rgb888[i * 3] = r;
+    rgb888[i * 3 + 1] = g;
+    rgb888[i * 3 + 2] = b;
+  }
+  
+  return rgb888;
+}
+
+// Helper: Convert RGB565 buffer to JPEG
+async function rgb565ToJpeg(rgb565Buffer, width = 96, height = 96) {
+  const rgb888 = rgb565ToRgb888(rgb565Buffer);
+  const imageBuffer = await sharp(rgb888, {
+    raw: {
+      width: width,
+      height: height,
+      channels: 3
+    }
+  }).jpeg({ quality: 85 }).toBuffer();
+  return imageBuffer;
+}
+
 // Initialize SQLite database
 let db;
 async function initDatabase() {
   const dataDir = path.join(__dirname, 'data');
   
-  // Ensure data directory exists
   if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
     console.log('📁 Created data directory:', dataDir);
@@ -44,7 +85,6 @@ async function initDatabase() {
       driver: sqlite3.Database
     });
     
-    // Create tables
     await db.exec(`
       CREATE TABLE IF NOT EXISTS detections (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,11 +99,6 @@ async function initDatabase() {
     `);
     
     console.log('✅ Database initialized successfully');
-    
-    // Test database
-    const test = await db.get('SELECT COUNT(*) as count FROM detections');
-    console.log(`📊 Existing records: ${test.count}`);
-    
   } catch (error) {
     console.error('❌ Database error:', error);
     throw error;
@@ -78,18 +113,31 @@ app.post('/upload-inference', upload.fields([
   try {
     // Parse metadata from ESP32
     const metadata = JSON.parse(req.body.metadata);
-    const imageBuffer = req.files.image[0].buffer;
+    const rawImageBuffer = req.files.image[0].buffer;
     
     console.log(`\n📸 Received from ESP32:`);
     console.log(`   Result: ${metadata.result}`);
     console.log(`   Probability: ${(metadata.probability * 100).toFixed(1)}%`);
-    console.log(`   Image size: ${imageBuffer.length} bytes`);
-    console.log(`   Timestamp: ${new Date(metadata.timestamp).toLocaleTimeString()}`);
+    console.log(`   Raw image size: ${rawImageBuffer.length} bytes`);
+    
+    // Check if it's RGB565 format (96x96x2 = 18432 bytes)
+    let jpegBuffer;
+    if (rawImageBuffer.length === 96 * 96 * 2) {
+      console.log(`   Detected RGB565 format, converting to JPEG...`);
+      jpegBuffer = await rgb565ToJpeg(rawImageBuffer, 96, 96);
+      console.log(`   Converted to JPEG: ${jpegBuffer.length} bytes`);
+    } else if (rawImageBuffer[0] === 0xFF && rawImageBuffer[1] === 0xD8) {
+      console.log(`   Already JPEG format`);
+      jpegBuffer = rawImageBuffer;
+    } else {
+      console.log(`   Unknown format, saving as is`);
+      jpegBuffer = rawImageBuffer;
+    }
     
     // Save to database
     const result = await db.run(
       'INSERT INTO detections (timestamp, probability, result, image_data) VALUES (?, ?, ?, ?)',
-      metadata.timestamp, metadata.probability, metadata.result, imageBuffer
+      metadata.timestamp, metadata.probability, metadata.result, jpegBuffer
     );
     
     console.log(`   Saved to database with ID: ${result.lastID}`);
@@ -97,7 +145,7 @@ app.post('/upload-inference', upload.fields([
     // Broadcast to web clients via WebSocket
     io.emit('new-detection', {
       id: result.lastID,
-      timestamp: metadata.timestamp,
+      timestamp: metadata.timestamp * 1000,
       probability: metadata.probability,
       result: metadata.result
     });
@@ -118,6 +166,7 @@ app.get('/api/detections', async (req, res) => {
       'SELECT id, timestamp, probability, result FROM detections ORDER BY timestamp DESC LIMIT ?',
       limit
     );
+    res.set('Cache-Control', 'no-store');  // no caching
     res.json(detections);
   } catch (error) {
     console.error('Error fetching detections:', error);
@@ -144,52 +193,55 @@ app.get('/api/image/:id', async (req, res) => {
   }
 });
 
-
 // API endpoint for statistics
 app.get('/api/statistics', async (req, res) => {
   try {
     const hours = parseInt(req.query.hours) || 24;
     const since = Date.now() - (hours * 3600000);
     
-    // Get all detections in time range
-    const allDetections = await db.all(`
-      SELECT result, probability, timestamp
+    const stats = await db.get(`
+      SELECT 
+        COUNT(*) as total_detections,
+        SUM(CASE WHEN result = 'NOT_ALLOWED' THEN 1 ELSE 0 END) as not_allowed_count,
+        AVG(probability) as avg_probability,
+        MIN(probability) as min_probability,
+        MAX(probability) as max_probability
       FROM detections
       WHERE timestamp > ?
-      ORDER BY timestamp DESC
     `, since);
     
-    const total_detections = allDetections.length;
-    const not_allowed_count = allDetections.filter(d => d.result === 'NOT_ALLOWED').length;
-    const avg_probability = allDetections.reduce((sum, d) => sum + d.probability, 0) / total_detections || 0;
-    
-    // Get hourly breakdown
     const hourly = await db.all(`
       SELECT 
-        strftime('%H:00', datetime(timestamp/1000, 'unixepoch', 'localtime')) as hour,
+        strftime('%H', datetime(timestamp/1000, 'unixepoch')) as utc_hour,
+        MIN(timestamp) as sample_ts,
         COUNT(*) as count,
         SUM(CASE WHEN result = 'NOT_ALLOWED' THEN 1 ELSE 0 END) as violations
       FROM detections
       WHERE timestamp > ?
-      GROUP BY hour
-      ORDER BY hour
+      GROUP BY utc_hour
+      ORDER BY utc_hour
     `, since);
-    
-    const stats = {
-      total_detections,
-      not_allowed_count,
-      avg_probability,
-      min_probability: Math.min(...allDetections.map(d => d.probability), 0),
-      max_probability: Math.max(...allDetections.map(d => d.probability), 0)
-    };
-    
-    res.json({ stats, hourly });
+
+    const localHourly = hourly.map(row => {
+      const date = new Date(row.sample_ts);
+      const localHour = date.toLocaleTimeString('en-GB', {
+        hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Brussels'
+      }).slice(0, 5);
+      return {
+        hour: localHour,
+        count: row.count,
+        violations: row.violations,
+      };
+    });
+
+    res.set('Cache-Control', 'no-store');
+    res.json({ stats, hourly: localHourly });
+
   } catch (error) {
     console.error('Error fetching statistics:', error);
     res.status(500).json({ error: error.message });
   }
 });
-
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ 
@@ -201,21 +253,33 @@ app.get('/health', (req, res) => {
 
 // WebSocket connection
 io.on('connection', (socket) => {
-  console.log('🔌 Web client connected');
+  console.log('Web client connected');
   socket.on('disconnect', () => {
-    console.log('🔌 Web client disconnected');
+    console.log('Web client disconnected');
   });
+});
+
+
+let sleepModeEnabled = true;
+
+app.get('/api/sleep-mode', (req, res) => {
+  res.json({ enabled: sleepModeEnabled });
+});
+
+app.post('/api/sleep-mode', (req, res) => {
+  sleepModeEnabled = req.body.enabled;
+  res.json({ enabled: sleepModeEnabled });
 });
 
 // Start server
 const PORT = 8080;
 initDatabase().then(() => {
   httpServer.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n✅ Server running on port ${PORT}`);
+    console.log(`\nServer running on port ${PORT}`);
     console.log(`   POST endpoint: http://localhost:${PORT}/upload-inference`);
     console.log(`   API: http://localhost:${PORT}/api/detections`);
     console.log(`   Health: http://localhost:${PORT}/health`);
-    console.log(`\n📡 Waiting for ESP32 connection...\n`);
+    console.log(`\nWaiting for ESP32 connection...\n`);
   });
 }).catch(error => {
   console.error('Failed to initialize database:', error);
