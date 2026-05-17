@@ -133,11 +133,18 @@ app.post('/upload-inference', upload.fields([
       console.log(`   Unknown format, saving as is`);
       jpegBuffer = rawImageBuffer;
     }
+
+    // Sanitize timestamp (fallback to server time if off by >10 minutes)
+    const now = Date.now();
+    let ts = metadata.timestamp;
+    if (!ts || Math.abs(ts - now) > 10 * 60 * 1000) {
+      ts = now;
+    }
     
     // Save to database
     const result = await db.run(
       'INSERT INTO detections (timestamp, probability, result, image_data) VALUES (?, ?, ?, ?)',
-      metadata.timestamp, metadata.probability, metadata.result, jpegBuffer
+      ts, metadata.probability, metadata.result, jpegBuffer
     );
     
     console.log(`   Saved to database with ID: ${result.lastID}`);
@@ -145,7 +152,7 @@ app.post('/upload-inference', upload.fields([
     // Broadcast to web clients via WebSocket
     io.emit('new-detection', {
       id: result.lastID,
-      timestamp: metadata.timestamp,
+      timestamp: ts,
       probability: metadata.probability,
       result: metadata.result
     });
@@ -269,6 +276,22 @@ app.get('/api/sleep-mode', (req, res) => {
 app.post('/api/sleep-mode', (req, res) => {
   sleepModeEnabled = req.body.enabled;
   res.json({ enabled: sleepModeEnabled });
+});
+
+// ── Sound trigger API (one-shot) ─────────────────────────────────────────────
+let soundTriggered = false;
+
+// Button sets it to true
+app.post('/api/trigger-sound', (req, res) => {
+  soundTriggered = true;
+  res.json({ ok: true });
+});
+
+// ESP32 polls; returns true once then resets
+app.get('/api/check-sound', (req, res) => {
+  const triggered = soundTriggered;
+  soundTriggered = false;
+  res.json({ triggered });
 });
 
 // Start server

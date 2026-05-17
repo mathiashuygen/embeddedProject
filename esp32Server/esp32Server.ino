@@ -10,8 +10,6 @@
 #include <esp_sleep.h>
 
 
-WebServer server(80);
-
 #define SLEEP_SECONDS     3       // deep sleep duration between inferences
 #define WIFI_TIMEOUT_MS   8000    // max time to wait for WiFi reconnect
 #define UPLOAD_WAIT_MS    3000    // max time to wait for upload to finish before sleeping
@@ -104,6 +102,12 @@ static void uploadTask(void* param) {
   }
 }
 
+// ── time sanity check ───────────────────────────────────────────────────────
+static bool isTimeValid() {
+  time_t now = time(nullptr);
+  return now > 1700000000; // ~Nov 2023
+}
+
 // ── sendImageToLaptopWithResult — non-blocking enqueue ───────────────────────
 bool sendImageToLaptopWithResult(float probability, bool isNotAllowed) {
   extern uint8_t*  inferenceImageBuffer;
@@ -111,6 +115,11 @@ bool sendImageToLaptopWithResult(float probability, bool isNotAllowed) {
 
   if (!inferenceImageBuffer || inferenceImageSize == 0) return false;
   if (!uploadQueue) return false;
+
+  if (!isTimeValid()) {
+    Serial.println("[UPLOAD] Time not valid yet, skipping upload");
+    return false;
+  }
 
   uint8_t* copy = (uint8_t*)malloc(inferenceImageSize);
   if (!copy) { Serial.println("[UPLOAD] malloc failed"); return false; }
@@ -132,7 +141,39 @@ bool sendImageToLaptopWithResult(float probability, bool isNotAllowed) {
   return true;
 }
 
+// ── Check for sound trigger from web ─────────────────────────────────────────
+static unsigned long lastSoundCheck = 0;
+const unsigned long SOUND_CHECK_INTERVAL = 1000; // Check every second
 
+void checkSoundTrigger() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  
+  unsigned long now = millis();
+  if (now - lastSoundCheck < SOUND_CHECK_INTERVAL) return;
+  lastSoundCheck = now;
+  
+  WiFiClient client;
+  client.setTimeout(2000);
+  
+  if (!client.connect(LAPTOP_IP, LAPTOP_PORT)) return;
+  
+  client.print("GET /api/check-sound HTTP/1.1\r\n");
+  client.print("Host: " + String(LAPTOP_IP) + "\r\n");
+  client.print("Connection: close\r\n\r\n");
+  
+  unsigned long timeout = millis() + 2000;
+  while (!client.available() && millis() < timeout) delay(5);
+  
+  while (client.available()) {
+    String line = client.readStringUntil('\n');
+    if (line.indexOf("\"triggered\":true") >= 0) {
+      Serial.println("🔊 Sound triggered from web!");
+      playLeaveIt(); // Your existing sound function
+      break;
+    }
+  }
+  client.stop();
+}
 
 // ── WiFi connect ──────────────────────────────────────────────────────────────
 static bool connectWiFi() {
@@ -182,7 +223,7 @@ static void checkSleepMode() {
 
 // ── goToDeepSleep — helper ────────────────────────────────────────────────────
 static void goToDeepSleep() {
-  time(&rtcTime);  // ✅ save exact time before sleeping
+  time(&rtcTime);  // save exact time before sleeping
   Serial.printf("Sleeping %ds (boot #%d, active for %lums)\n",
     SLEEP_SECONDS, bootCount, millis());
   Serial.flush();
@@ -210,7 +251,7 @@ void setup() {
   bool wifiOk = connectWiFi();
 
   if (wifiOk) {
-    // ✅ Set timezone for Brussels (CET/CEST)
+    // Set timezone for Brussels (CET/CEST)
     setenv("TZ", "CET-1CEST,M3.5.0/2,M10.5.0/3", 1);
     tzset();
 
@@ -271,8 +312,10 @@ void setup() {
 
 void loop() {
   // Only reached when sleep mode is OFF
-  server.handleClient();
-
+  
+  // Check for sound triggers from web
+  checkSoundTrigger();
+  
   static unsigned long lastInference = 0;
   if (millis() - lastInference >= (SLEEP_SECONDS * 1000)) {
     lastInference = millis();

@@ -49,6 +49,7 @@ export default function Home() {
   const [serverConnected, setServerConnected] = useState(false);
   const [esp32Online, setEsp32Online] = useState(false);
   const [sleepMode, setSleepMode] = useState(true);
+  const [soundPending, setSoundPending] = useState(false);
   const socketRef = useRef<Socket | null>(null);
   const esp32TimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestImageRef = useRef<string | null>(null);
@@ -100,6 +101,17 @@ export default function Home() {
       const data = await res.json();
       setSleepMode(data.enabled);
     } catch (e) { console.error('Sleep toggle error:', e); }
+  };
+
+  const triggerSound = async () => {
+    try {
+      setSoundPending(true);
+      await fetch(`${BACKEND_URL}/api/trigger-sound`, { method: 'POST' });
+    } catch (e) {
+      console.error('Sound trigger error:', e);
+    } finally {
+      setTimeout(() => setSoundPending(false), 400);
+    }
   };
 
   useEffect(() => {
@@ -171,7 +183,7 @@ export default function Home() {
           --red:     #ef4444;
           --red-bg:  rgba(239,68,68,0.08);
           --green:   #22c55e;
-          --grn-bg:  rgba(34,197,94,0.08);
+          --grn-bg:  rgba(34,197,94,.08);
           --blue:    #60a5fa;
         }
 
@@ -189,7 +201,7 @@ export default function Home() {
           --red:     #dc2626;
           --red-bg:  rgba(220,38,38,0.05);
           --green:   #16a34a;
-          --grn-bg:  rgba(22,163,74,0.06);
+          --grn-bg:  rgba(22,163,74,.06);
           --blue:    #2563eb;
         }
 
@@ -296,6 +308,24 @@ export default function Home() {
         }
         input:checked + .slider { background: var(--green); }
         input:checked + .slider::before { transform: translateX(18px); }
+
+        /* ── Sound button ── */
+        .sound-btn {
+          display: inline-flex; align-items: center; gap: 8px;
+          padding: 8px 14px;
+          border-radius: 10px;
+          border: 1px solid var(--border2);
+          background: var(--bg2);
+          color: var(--text2);
+          cursor: pointer;
+          font-size: 13px;
+          font-weight: 500;
+          transition: background .15s, transform .06s;
+          -webkit-tap-highlight-color: transparent;
+        }
+        .sound-btn:active { background: var(--bg3); transform: translateY(1px); }
+        .sound-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+        .sound-btn.busy { opacity: 0.7; pointer-events: none; }
 
         /* ── Alert ── */
         .alert {
@@ -463,6 +493,12 @@ export default function Home() {
               <div className={`dot ${esp32Online ? 'dot-on' : 'dot-warn'}`} />
               Camera
             </div>
+
+            <button className={`sound-btn ${soundPending ? 'busy' : ''}`} onClick={triggerSound}>
+              <span className="sound-dot" />
+              Play sound
+            </button>
+
             <div className="sleep-toggle" onClick={toggleSleep}>
               <span className="sleep-label">Sleep Regime</span>
               <label className="switch" onClick={e => e.stopPropagation()}>
@@ -553,7 +589,7 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="card section">
+          <div className="card">
             <div className="card-hdr"><span className="card-title">Detection split</span></div>
             <div style={{ padding: '14px 10px 10px' }}>
               <div className="chart-wrap">

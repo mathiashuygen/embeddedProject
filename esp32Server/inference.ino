@@ -13,7 +13,7 @@
 #include "model_data.h"
 
 // ── Config ────────────────────────────────────────────────────
-#define TENSOR_ARENA_SIZE (512 * 1024)
+#define TENSOR_ARENA_SIZE (800 * 1024)
 
 // ── I2S / Audio ───────────────────────────────────────────────
 #define PIN_I2S_BCLK 11
@@ -29,7 +29,7 @@ static uint8_t* tensorArena = nullptr;
 static uint8_t* rgbBuf = nullptr;
 static uint8_t* interpMem = nullptr;
 
-static tflite::MicroMutableOpResolver<9>* resolver = nullptr;
+static tflite::MicroMutableOpResolver<10>* resolver = nullptr;
 static tflite::MicroInterpreter* interpreter = nullptr;
 static const tflite::Model* tflModel = nullptr;
 
@@ -119,7 +119,7 @@ void inferenceSetup() {
     Serial.printf("Schema mismatch: %d vs %d\n", tflModel->version(), TFLITE_SCHEMA_VERSION);
     return;
   }
-  resolver = new tflite::MicroMutableOpResolver<9>();
+  resolver = new tflite::MicroMutableOpResolver<10>();
 
   resolver->AddMul();
   resolver->AddAdd();
@@ -130,6 +130,7 @@ void inferenceSetup() {
   resolver->AddMaxPool2D();
   resolver->AddMean();
   resolver->AddQuantize();
+  resolver->AddConcatenation();
 
   interpMem = (uint8_t*)heap_caps_aligned_alloc(16,
                                                 sizeof(tflite::MicroInterpreter), MALLOC_CAP_SPIRAM);
